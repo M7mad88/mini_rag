@@ -1,11 +1,12 @@
-from fastapi import FastAPI,APIROUTER
+from fastapi import APIRouter
 
-base_router =  = APIROUTER()
+base_router = APIRouter(tags=["Base"])
 
-@app.get("/")
+@base_router.get("/")
 def root():
     return {"status": "ok", "message": "Mini RAG API is running"}
 
-@app.get("/welcome")
+@base_router.get("/welcome")
 def welcome():
     return {"message": "Hello World"}
+
