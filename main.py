@@ -3,7 +3,7 @@ from routes.base import base_router
 
 app = FastAPI()
 
-app.include_router(base_router, prefix="/api/v1")
+app.include_router(router, prefix="/api/v1")
 
 
 
