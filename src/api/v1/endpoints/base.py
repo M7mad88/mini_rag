@@ -6,16 +6,15 @@ router = APIRouter(tags=["Base"])
 
 
 @router.get("/", summary="Health check")
-async health():
+async def health():
     return {"status": "ok", "message": "Mini RAG API is running"}
 
 
 @router.get("/welcome", summary="App info")
-async welcome():
+async def welcome():
     settings = get_settings()
     return {
         "app_name": settings.APP_NAME,
         "app_version": settings.APP_VERSION,
         "env": settings.ENV,
     }
-
