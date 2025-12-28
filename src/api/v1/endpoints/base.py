@@ -1,6 +1,6 @@
 # src/api/v1/endpoints/base.py
-from fastapi import APIRouter
-from src.core.config import get_settings
+from fastapi import APIRouter, Depends
+from src.core.config import Settings, get_settings
 
 router = APIRouter(tags=["Base"])
 
@@ -11,8 +11,7 @@ async def health():
 
 
 @router.get("/welcome", summary="App info")
-async def welcome():
-    settings = get_settings()
+async def welcome(settings: Settings = Depends(get_settings)):
     return {
         "app_name": settings.APP_NAME,
         "app_version": settings.APP_VERSION,

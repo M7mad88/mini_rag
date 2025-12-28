@@ -1,9 +1,18 @@
+# main.py
 from fastapi import FastAPI
-from routes.base import base_router
+from src.core.config import get_settings
+from src.api.v1.router import api_router
 
-app = FastAPI()
+def create_app() -> FastAPI:
+    settings = get_settings()
 
-app.include_router(router, prefix="/api/v1")
+    app = FastAPI(
+        title=settings.APP_NAME,
+        version=settings.APP_VERSION,
+    )
 
+    app.include_router(api_router, prefix=settings.API_V1_PREFIX)
 
+    return app
 
+app = create_app()
