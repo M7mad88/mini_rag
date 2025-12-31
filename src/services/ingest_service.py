@@ -62,7 +62,7 @@ async def save_upload_file(project_id: str, file: UploadFile, settings: Settings
         # مهم: اقفل ملف الرفع
         await file.close()
 
-    # ✅ رجّع saved_path بشكل واضح (يفضل كنص)
+    #  رجّع saved_path بشكل واضح (يفضل كنص)
     meta = {
         "project_id": project_id,
         "file_id": file_id,

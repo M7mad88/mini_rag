@@ -15,8 +15,12 @@ class Settings(BaseSettings):
 
     FILE_ALLOWED_TYPES: list[str] = ["text/plain", "application/pdf"]
     FILE_MAX_SIZE: int = 10  # MB
+  
+    MONGODB_URL: str = "mongodb://localhost:28017"
+    MONGODB_DATABASE: str = "mini-rag"
 
-    # ✅ مهم: مكان حفظ الملفات
+
+    #  مهم: مكان حفظ الملفات
     UPLOAD_ROOT: str = "assets/uploads"
     PROCESSED_ROOT: str = "assets/processed"  # (اختياري لمرحلة الـ chunks)
 
