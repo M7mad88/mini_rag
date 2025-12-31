@@ -1,98 +1,153 @@
 # src/services/mongo_store.py
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Iterable
+from datetime import datetime, timezone
+from typing import Any, Optional
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
+from pymongo import ASCENDING
+from pymongo.errors import OperationFailure
 
-from src.schemas.db import ProjectDoc, FileDoc, ChunkDoc
 
-
-# Collection names (ثابتة وواضحة)
 COL_PROJECTS = "projects"
 COL_FILES = "files"
 COL_CHUNKS = "chunks"
 
 
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+async def _safe_create_index(collection, keys, **kwargs) -> None:
+    """
+    Create index safely:
+    - If an equivalent index already exists with a different name, ignore it.
+    - If it exists exactly, Mongo will just return the name.
+    """
+    try:
+        await collection.create_index(keys, **kwargs)
+    except OperationFailure as e:
+        # Index already exists with different name OR options conflict
+        # We ignore it because the index we need is already there (or close enough).
+        if e.code in (85, 86):  # IndexOptionsConflict, IndexKeySpecsConflict
+            return
+        raise
+
+
 async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
     """
-    (اختياري) يفضل تناديها مرة واحدة عند startup.
+    Ensure minimal indexes exist (safe to call on startup).
+    IMPORTANT: We do NOT set custom 'name' to avoid conflicts with existing indexes.
     """
-    await db[COL_PROJECTS].create_index("project_id", unique=True)
+    projects = db[COL_PROJECTS]
+    files = db[COL_FILES]
+    chunks = db[COL_CHUNKS]
 
-    await db[COL_FILES].create_index([("project_id", 1), ("file_id", 1)], unique=True)
-    await db[COL_FILES].create_index("project_id")
+    # projects: unique project_id
+    await _safe_create_index(projects, [("project_id", ASCENDING)], unique=True)
 
-    await db[COL_CHUNKS].create_index([("project_id", 1), ("file_id", 1), ("chunk_order", 1)], unique=True)
-    await db[COL_CHUNKS].create_index([("project_id", 1), ("file_id", 1)])
+    # files: unique (project_id, file_id)
+    await _safe_create_index(files, [("project_id", ASCENDING), ("file_id", ASCENDING)], unique=True)
+    await _safe_create_index(files, [("project_id", ASCENDING)])
+    await _safe_create_index(files, [("status", ASCENDING)])
+
+    # chunks: unique (project_id, file_id, chunk_id)
+    await _safe_create_index(chunks, [("project_id", ASCENDING), ("file_id", ASCENDING), ("chunk_id", ASCENDING)], unique=True)
+    await _safe_create_index(chunks, [("project_id", ASCENDING), ("file_id", ASCENDING)])
 
 
 async def upsert_project(db: AsyncIOMotorDatabase, project_id: str) -> None:
-    doc = ProjectDoc(project_id=project_id).model_dump()
-
+    now = _now()
     await db[COL_PROJECTS].update_one(
         {"project_id": project_id},
-        {"$setOnInsert": doc},
+        {
+            "$setOnInsert": {"project_id": project_id, "created_at": now},
+            "$set": {"updated_at": now},
+        },
         upsert=True,
     )
 
 
-async def insert_file(db: AsyncIOMotorDatabase, file_doc: FileDoc) -> None:
+async def insert_file(db: AsyncIOMotorDatabase, file_doc: Any) -> None:
     """
-    Upsert to avoid duplicates if same file_id is retried.
+    Upsert file doc by (project_id, file_id).
+    created_at only in $setOnInsert to avoid conflicts.
     """
-    payload = file_doc.model_dump()
+    now = _now()
+    data = file_doc.model_dump(exclude_none=True)
+
+    # Remove created_at from $set to avoid conflict
+    data.pop("created_at", None)
 
     await db[COL_FILES].update_one(
-        {"project_id": file_doc.project_id, "file_id": file_doc.file_id},
-        {"$set": payload, "$setOnInsert": {"created_at": payload.get("created_at", datetime.utcnow())}},
+        {"project_id": data["project_id"], "file_id": data["file_id"]},
+        {
+            "$setOnInsert": {"created_at": now},
+            "$set": {**data, "updated_at": now},
+        },
         upsert=True,
     )
 
 
-async def get_file(db: AsyncIOMotorDatabase, project_id: str, file_id: str) -> dict | None:
-    return await db[COL_FILES].find_one(
-        {"project_id": project_id, "file_id": file_id},
-        {"_id": 0},  # نخفي _id
-    )
+async def get_file(db: AsyncIOMotorDatabase, project_id: str, file_id: str) -> Optional[dict]:
+    return await db[COL_FILES].find_one({"project_id": project_id, "file_id": file_id})
 
 
-async def insert_chunks(db: AsyncIOMotorDatabase, chunks: Iterable[ChunkDoc]) -> int:
+async def insert_chunks(
+    db: AsyncIOMotorDatabase,
+    project_id: str,
+    file_id: str,
+    chunks: list[str],
+    metadata: dict | None = None,
+) -> int:
     """
-    Insert many chunks. Returns inserted count.
-    If duplicates happen (re-process), better to clear old ones first or use upserts.
-    Here: we do insert_many with ordered=False.
+    Replace chunks for a file (delete old then insert new).
     """
-    docs = [c.model_dump() for c in chunks]
-    if not docs:
+    if not chunks:
         return 0
 
-    # ممكن تمسح القديم قبل الإدخال لتجنب duplicate key errors:
-    # await db[COL_CHUNKS].delete_many({"project_id": docs[0]["project_id"], "file_id": docs[0]["file_id"]})
+    meta = metadata or {}
+    now = _now()
 
-    try:
-        res = await db[COL_CHUNKS].insert_many(docs, ordered=False)
-        return len(res.inserted_ids)
-    except Exception:
-        # لو حصل duplicates (re-run) ممكن تكون بعضهم اتضاف قبل كده
-        # هنرجع count تقريبي: عدد docs المطلوبة (أو تسيبها 0 وتخلي process يقرّر)
-        return len(docs)
+    await db[COL_CHUNKS].delete_many({"project_id": project_id, "file_id": file_id})
+
+    docs = [
+        {
+            "project_id": project_id,
+            "file_id": file_id,
+            "chunk_id": i,
+            "chunk_text": text,
+            "chunk_metadata": meta,
+            "created_at": now,
+            "updated_at": now,
+        }
+        for i, text in enumerate(chunks)
+    ]
+
+    res = await db[COL_CHUNKS].insert_many(docs)
+    return len(res.inserted_ids)
 
 
 async def mark_file_processed(
     db: AsyncIOMotorDatabase,
     project_id: str,
     file_id: str,
+    *,
+    chunk_count: int,
+    total_chars: int,
     output_path: str,
 ) -> None:
+    now = _now()
     await db[COL_FILES].update_one(
         {"project_id": project_id, "file_id": file_id},
         {
             "$set": {
                 "status": "processed",
-                "processed_output_path": output_path,
-                "processed_at": datetime.utcnow(),
+                "processed_at": now,
+                "output_path": output_path,
+                "chunk_count": int(chunk_count),
+                "total_chars": int(total_chars),
+                "updated_at": now,
             }
         },
     )

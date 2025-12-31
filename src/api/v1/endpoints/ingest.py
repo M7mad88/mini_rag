@@ -54,7 +54,7 @@ async def upload_document(
 
     meta = UploadMeta(**meta_dict)
 
-    # 3) Store in MongoDB
+    # 3) Store metadata in MongoDB
     try:
         await upsert_project(db, project_id=project_id)
 
@@ -80,7 +80,6 @@ async def upload_document(
             ).model_dump(),
         )
 
-    # 4) Response
     return APIResponse(
         signal=ResponseSignal.FILE_UPLOAD_SUCCESS,
         message="File uploaded successfully",

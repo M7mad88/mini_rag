@@ -9,23 +9,22 @@ from src.clients.deps import get_db
 from src.enums.response_signal import ResponseSignal
 from src.schemas.common import APIResponse
 from src.schemas.process import ProcessRequest, ProcessResult, ChunkInfo
-from src.schemas.db import ChunkDoc
 
 from src.services.process_service import extract_text, chunk_text, save_chunks_json
-from src.services.mongo_store import get_file, insert_chunks, mark_file_processed, COL_CHUNKS
+from src.services.mongo_store import get_file, insert_chunks, mark_file_processed
 
 router = APIRouter(tags=["Process"])
 
 
-@router.post("/process/chunk", response_model=APIResponse, summary="Extract + chunk document")
+@router.post("/process/chunk", response_model=APIResponse, summary="Extract + chunk document + store chunks in MongoDB")
 async def process_document(
     req: ProcessRequest,
     settings: Settings = Depends(get_settings),
     db: AsyncIOMotorDatabase = Depends(get_db),
 ):
-    # 1) (اختياري لكن مهم) تأكد الملف موجود في DB
-    file_rec = await get_file(db, project_id=req.project_id, file_id=req.file_id)
-    if not file_rec:
+    # 1) Get file doc from MongoDB (source of truth)
+    file_doc = await get_file(db, project_id=req.project_id, file_id=req.file_id)
+    if not file_doc:
         raise HTTPException(
             status_code=404,
             detail=APIResponse(
@@ -35,63 +34,68 @@ async def process_document(
             ).model_dump(),
         )
 
-    # 2) تأكد path موجود على الديسك
-    file_path = Path(req.saved_path)
+    saved_path = file_doc.get("saved_path")
+    if not saved_path:
+        raise HTTPException(
+            status_code=400,
+            detail=APIResponse(
+                signal=ResponseSignal.FILE_PROCESS_FAILED,
+                message="Missing saved_path in MongoDB file document",
+                data={"project_id": req.project_id, "file_id": req.file_id},
+            ).model_dump(),
+        )
+
+    file_path = Path(saved_path)
     if not file_path.exists():
         raise HTTPException(
             status_code=404,
             detail=APIResponse(
                 signal=ResponseSignal.FILE_NOT_FOUND,
-                message="File not found on disk",
-                data={"saved_path": req.saved_path},
+                message="File not found on disk (saved_path)",
+                data={"saved_path": saved_path},
             ).model_dump(),
         )
 
+    # 2) Extract + chunk
     try:
-        # 3) Extract + Chunk
         text = extract_text(file_path)
         chunks = chunk_text(text, chunk_size=req.chunk_size, overlap=req.chunk_overlap)
 
-        # 4) Save chunks JSON (على الديسك)
-        out_dir = Path(settings.PROCESSED_ROOT) / req.project_id
-        out_path = out_dir / f"{req.file_id}_chunks.json"
-        save_chunks_json(out_path, req.project_id, req.file_id, chunks)
+        # (اختياري) احفظ chunks JSON على الديسك
+        output_path = None
+        if settings.PROCESSED_ROOT:
+            out_dir = Path(settings.PROCESSED_ROOT) / req.project_id
+            out_path = out_dir / f"{req.file_id}_chunks.json"
+            save_chunks_json(out_path, req.project_id, req.file_id, chunks)
+            output_path = str(out_path)
 
-        # 5) Store chunks in MongoDB
-        # امسح chunks القديمة لنفس الملف (لتجنب duplicates عند إعادة التشغيل)
-        await db[COL_CHUNKS].delete_many({"project_id": req.project_id, "file_id": req.file_id})
+        # 3) Store chunks in MongoDB
+        inserted = await insert_chunks(db, project_id=req.project_id, file_id=req.file_id, chunks=chunks)
 
-        chunk_docs = [
-            ChunkDoc(
-                project_id=req.project_id,
-                file_id=req.file_id,
-                chunk_order=i,
-                chunk_text=chunk_text_str,
-                chunk_metadata={"source": str(file_path), "saved_path": req.saved_path},
-            )
-            for i, chunk_text_str in enumerate(chunks)
-        ]
-        inserted_count = await insert_chunks(db, chunk_docs)
-
-        # 6) Mark file processed
+        # 4) Mark file as processed in MongoDB
         await mark_file_processed(
             db,
             project_id=req.project_id,
             file_id=req.file_id,
-            output_path=str(out_path),
+            chunk_count=len(chunks),
+            total_chars=len(text),
+            output_path=output_path or "",
         )
 
-        # 7) Response
         result = ProcessResult(
             project_id=req.project_id,
             file_id=req.file_id,
-            output_path=str(out_path),
-            chunks=ChunkInfo(chunk_count=len(chunks), total_chars=len(text)),
+            output_path=output_path,
+            chunks=ChunkInfo(
+                chunk_count=len(chunks),
+                total_chars=len(text),
+                inserted_chunks=inserted,
+            ),
         )
 
         return APIResponse(
             signal=ResponseSignal.FILE_PROCESS_SUCCESS,
-            message=f"File processed and stored in MongoDB (inserted_chunks={inserted_count})",
+            message="File processed and chunks stored in MongoDB successfully",
             data=result.model_dump(),
         )
 
