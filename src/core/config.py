@@ -19,6 +19,18 @@ class Settings(BaseSettings):
     MONGODB_URL: str = "mongodb://localhost:28017"
     MONGODB_DATABASE: str = "mini-rag"
 
+    # ---------- Embeddings ----------
+    EMBEDDING_BACKEND: str = "OPENAI"   # OPENAI (now)
+    EMBEDDING_MODEL_ID: str = "text-embedding-3-small"
+    EMBEDDING_DIM: int = 1536           # set correct dim for your model
+
+    
+
+    # ---------- Vector DB (Qdrant) ----------
+    VECTOR_DB_BACKEND: str = "QDRANT"
+    QDRANT_URL: str = "http://localhost:6333"
+    QDRANT_COLLECTION: str = "mini_rag_chunks"
+
 
     #  مهم: مكان حفظ الملفات
     UPLOAD_ROOT: str = "assets/uploads"

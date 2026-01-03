@@ -11,3 +11,7 @@ class ResponseSignal(str, Enum):
     FILE_PROCESS_SUCCESS = "file_process_success"
     FILE_PROCESS_FAILED = "file_process_failed"
     FILE_NOT_FOUND = "file_not_found"
+    INDEX_SUCCESS = "index_success"
+    INDEX_FAILED = "index_failed"
+    SEARCH_SUCCESS = "search_success"
+    SEARCH_FAILED = "search_failed"

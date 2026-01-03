@@ -1,8 +1,7 @@
-# src/services/mongo_store.py
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Optional, Dict, List
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from pymongo import ASCENDING
@@ -19,40 +18,30 @@ def _now() -> datetime:
 
 
 async def _safe_create_index(collection, keys, **kwargs) -> None:
-    """
-    Create index safely:
-    - If an equivalent index already exists with a different name, ignore it.
-    - If it exists exactly, Mongo will just return the name.
-    """
     try:
         await collection.create_index(keys, **kwargs)
     except OperationFailure as e:
-        # Index already exists with different name OR options conflict
-        # We ignore it because the index we need is already there (or close enough).
         if e.code in (85, 86):  # IndexOptionsConflict, IndexKeySpecsConflict
             return
         raise
 
 
 async def ensure_indexes(db: AsyncIOMotorDatabase) -> None:
-    """
-    Ensure minimal indexes exist (safe to call on startup).
-    IMPORTANT: We do NOT set custom 'name' to avoid conflicts with existing indexes.
-    """
     projects = db[COL_PROJECTS]
     files = db[COL_FILES]
     chunks = db[COL_CHUNKS]
 
-    # projects: unique project_id
     await _safe_create_index(projects, [("project_id", ASCENDING)], unique=True)
 
-    # files: unique (project_id, file_id)
     await _safe_create_index(files, [("project_id", ASCENDING), ("file_id", ASCENDING)], unique=True)
     await _safe_create_index(files, [("project_id", ASCENDING)])
     await _safe_create_index(files, [("status", ASCENDING)])
 
-    # chunks: unique (project_id, file_id, chunk_id)
-    await _safe_create_index(chunks, [("project_id", ASCENDING), ("file_id", ASCENDING), ("chunk_id", ASCENDING)], unique=True)
+    await _safe_create_index(
+        chunks,
+        [("project_id", ASCENDING), ("file_id", ASCENDING), ("chunk_id", ASCENDING)],
+        unique=True,
+    )
     await _safe_create_index(chunks, [("project_id", ASCENDING), ("file_id", ASCENDING)])
 
 
@@ -69,14 +58,8 @@ async def upsert_project(db: AsyncIOMotorDatabase, project_id: str) -> None:
 
 
 async def insert_file(db: AsyncIOMotorDatabase, file_doc: Any) -> None:
-    """
-    Upsert file doc by (project_id, file_id).
-    created_at only in $setOnInsert to avoid conflicts.
-    """
     now = _now()
     data = file_doc.model_dump(exclude_none=True)
-
-    # Remove created_at from $set to avoid conflict
     data.pop("created_at", None)
 
     await db[COL_FILES].update_one(
@@ -102,6 +85,7 @@ async def insert_chunks(
 ) -> int:
     """
     Replace chunks for a file (delete old then insert new).
+    Store BOTH `text` and `chunk_text` for backward compatibility.
     """
     if not chunks:
         return 0
@@ -111,21 +95,62 @@ async def insert_chunks(
 
     await db[COL_CHUNKS].delete_many({"project_id": project_id, "file_id": file_id})
 
-    docs = [
-        {
-            "project_id": project_id,
-            "file_id": file_id,
-            "chunk_id": i,
-            "chunk_text": text,
-            "chunk_metadata": meta,
-            "created_at": now,
-            "updated_at": now,
-        }
-        for i, text in enumerate(chunks)
-    ]
+    docs = []
+    for i, text in enumerate(chunks):
+        docs.append(
+            {
+                "project_id": project_id,
+                "file_id": file_id,
+                "chunk_id": i,
+
+                # ✅ canonical
+                "text": text,
+
+                # ✅ backward compat (لو أي جزء قديم بيقرأ chunk_text)
+                "chunk_text": text,
+
+                "metadata": meta,
+                "chunk_metadata": meta,  # backward compat
+
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
 
     res = await db[COL_CHUNKS].insert_many(docs)
     return len(res.inserted_ids)
+
+
+async def get_chunks(
+    db: AsyncIOMotorDatabase,
+    project_id: str,
+    file_id: str,
+) -> List[Dict[str, Any]]:
+    """
+    Return chunks in a unified format:
+      [{"chunk_id": int, "text": str}, ...]
+    Supports docs that store either `text` or `chunk_text`.
+    """
+    cur = db[COL_CHUNKS].find(
+        {"project_id": project_id, "file_id": file_id},
+        {"_id": 0, "chunk_id": 1, "text": 1, "chunk_text": 1},
+    ).sort("chunk_id", ASCENDING)
+
+    docs = await cur.to_list(length=None)
+
+    out: List[Dict[str, Any]] = []
+    for d in docs:
+        chunk_id = int(d.get("chunk_id", 0))
+        text = d.get("text")
+        if text is None:
+            text = d.get("chunk_text")
+
+        if not text:
+            continue
+
+        out.append({"chunk_id": chunk_id, "text": str(text)})
+
+    return out
 
 
 async def mark_file_processed(
